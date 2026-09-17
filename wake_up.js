@@ -128,12 +128,13 @@ async function sendPushNotification({ title, body }) {
     return { ok: false, providerLabel: "Bark", reason: "Bark Key 未配置" };
   }
 
-  const barkPayload = {
-    title,
-    body,
-    device_key: process.env.BARK_KEY,
-    icon: process.env.CUSTOM_ICON_URL
-  };
+const barkPayload = {
+  title,
+  body,
+  device_key: process.env.BARK_KEY,
+  icon: process.env.CUSTOM_ICON_URL,
+  sound: "healthnotification"
+};
 
   const response = await fetch("https://api.day.app/push", {
     method: "POST",
