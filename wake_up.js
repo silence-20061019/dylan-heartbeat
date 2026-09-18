@@ -27,6 +27,7 @@ const WAKE_UPSTREAM_TIMEOUT_MS = readPositiveTimeout("WAKE_UPSTREAM_TIMEOUT_MS",
 
 let lateNightNudgeCount = 0;
 let lateNightNudgeDate = "";
+let morningWeatherDate = "";
 
 function readPositiveTimeout(key, fallback) {
   const value = Number(process.env[key]);
@@ -302,9 +303,14 @@ async function fetchPhoneActivity() {
   }
 }
 
-// ===== 测试版：全天都算深夜 =====
 function isLateNight() {
-  return true;
+  const hour = getHourInTimeZone(new Date(), TIME_ZONE);
+  return hour >= 23 || hour < 5;
+}
+
+function isMorningWeatherTime() {
+  const hour = getHourInTimeZone(new Date(), TIME_ZONE);
+  return hour >= 7 && hour < 9;
 }
 
 async function fetchRecentPhoneActivity(minutes = 30) {
@@ -381,7 +387,7 @@ function stripPosition(messages) {
   return messages.map(({ position, ...rest }) => rest);
 }
 
-function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
+function buildWakePrompt(currentTime, diffMinutes, weatherContext = "", forceWeather = false) {
   const promptFile = path.join(__dirname, "wake_prompt.txt");
   if (fs.existsSync(promptFile)) {
     const template = fs.readFileSync(promptFile, "utf-8");
@@ -401,16 +407,25 @@ function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
       .replace(/\$\{weather\}/g, weatherContext);
   }
 
+  const forceWeatherLine = forceWeather
+    ? "\n- 这是早上的天气播报，你必须先播报天气，再说别的。"
+    : "";
+
   return `
 ## 最高优先级规则
 1. 这是一次后台自动唤醒，不是用户发起的对话。你没有收到任何新消息。
 2. 你的唯一任务是决定是否主动联系用户。不能生成对话回复。
 3. 输出格式必须严格遵守以下二选一。
 
+## 特别要求
+- 如果下面的信息里有「天气信息」，你必须在推送里提到今天的天气。
+- 如果下面的信息里有「用户最近打开的手机 App」，你必须在推送里提到。
+- 不要忽略这些信息。
+
 ## 唤醒信息
 - 当前时间：${currentTime}
 - 距离用户最后一条消息：${diffMinutes} 分钟
-${weatherContext ? `\n${weatherContext}\n` : ""}
+${weatherContext ? `\n${weatherContext}\n` : ""}${forceWeatherLine}
 
 ## 输出格式
 - 如果想联系用户，直接写你想说的话。系统会自动打包成手机推送发送。可以是一句话，也可以第一行作为标题、第二行作为正文。
@@ -437,8 +452,21 @@ async function runWakeUp() {
   const diffMinutes = Math.floor((now - lastUserTime) / 1000 / 60);
 
   let forceWake = false;
+  let forceWeather = false;
 
-  if (!shouldWake(lastUserTime)) {
+  // 早上 7-9 点，每天推一次天气
+  if (isMorningWeatherTime()) {
+    const today = getChinaTimeString().slice(0, 10);
+    if (morningWeatherDate !== today) {
+      morningWeatherDate = today;
+      forceWake = true;
+      forceWeather = true;
+      console.log(`\n早上天气播报：${today}，强制唤醒\n`);
+    }
+  }
+
+  // 深夜 App 检测
+  if (!forceWake && !shouldWake(lastUserTime)) {
     if (isLateNight()) {
       const today = getChinaTimeString().slice(0, 10);
       if (lateNightNudgeDate !== today) {
@@ -454,16 +482,16 @@ async function runWakeUp() {
         }
       }
     }
+  }
 
-    if (!forceWake) {
-      console.log(`\n暂不需要唤醒（lastUserTime=${lastUserTime.toISOString()}, diffMinutes=${diffMinutes}, need=${getWakeAfterMinutes(now)}）\n`);
-      return;
-    }
+  if (!forceWake && !shouldWake(lastUserTime)) {
+    console.log(`\n暂不需要唤醒（lastUserTime=${lastUserTime.toISOString()}, diffMinutes=${diffMinutes}, need=${getWakeAfterMinutes(now)}）\n`);
+    return;
   }
 
   const weatherContext = await fetchWeatherContext();
   const phoneContext = await fetchPhoneActivity();
-  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext + "\n" + phoneContext);
+  const wakePrompt = buildWakePrompt(getChinaTimeString(), diffMinutes, weatherContext + "\n" + phoneContext, forceWeather);
   const cleanMessages = stripPosition(messages);
 
   const historyText = cleanMessages
