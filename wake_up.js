@@ -25,6 +25,9 @@ const DIARY_DIR_PATH = runtimeDirectory(DIARY_DIR_NAME, "diary");
 const PUSH_TIMEOUT_MS = readPositiveTimeout("PUSH_TIMEOUT_MS", 15_000);
 const WAKE_UPSTREAM_TIMEOUT_MS = readPositiveTimeout("WAKE_UPSTREAM_TIMEOUT_MS", 300_000);
 
+let lateNightNudgeCount = 0;
+let lateNightNudgeDate = "";
+
 function readPositiveTimeout(key, fallback) {
   const value = Number(process.env[key]);
   return Number.isFinite(value) && value >= 1000 ? Math.floor(value) : fallback;
@@ -299,6 +302,32 @@ async function fetchPhoneActivity() {
   }
 }
 
+// ===== 测试版：全天都算深夜 =====
+function isLateNight() {
+  return true;
+}
+
+async function fetchRecentPhoneActivity(minutes = 30) {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_ANON_KEY;
+  if (!url || !key) return [];
+
+  try {
+    const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+    const response = await fetch(`${url}/rest/v1/phone_activity?select=app_name,opened_at&opened_at=gte.${since}&order=opened_at.desc&limit=20`, {
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`
+      }
+    });
+    if (!response.ok) return [];
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
 function loadTimelineMessages() {
   if (!fs.existsSync(TIMELINE_PATH)) {
     console.log("未找到 enhanced_messages.json");
@@ -407,9 +436,29 @@ async function runWakeUp() {
   const now = new Date();
   const diffMinutes = Math.floor((now - lastUserTime) / 1000 / 60);
 
+  let forceWake = false;
+
   if (!shouldWake(lastUserTime)) {
-    console.log(`\n暂不需要唤醒（lastUserTime=${lastUserTime.toISOString()}, diffMinutes=${diffMinutes}, need=${getWakeAfterMinutes(now)}）\n`);
-    return;
+    if (isLateNight()) {
+      const today = getChinaTimeString().slice(0, 10);
+      if (lateNightNudgeDate !== today) {
+        lateNightNudgeDate = today;
+        lateNightNudgeCount = 0;
+      }
+      if (lateNightNudgeCount < 2) {
+        const recentActivity = await fetchRecentPhoneActivity(30);
+        if (recentActivity.length > 0) {
+          console.log(`\n深夜 App 活动检测：最近 30 分钟有 ${recentActivity.length} 条记录，强制唤醒\n`);
+          forceWake = true;
+          lateNightNudgeCount++;
+        }
+      }
+    }
+
+    if (!forceWake) {
+      console.log(`\n暂不需要唤醒（lastUserTime=${lastUserTime.toISOString()}, diffMinutes=${diffMinutes}, need=${getWakeAfterMinutes(now)}）\n`);
+      return;
+    }
   }
 
   const weatherContext = await fetchWeatherContext();
