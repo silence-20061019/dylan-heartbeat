@@ -418,7 +418,7 @@ function buildWakePrompt(currentTime, diffMinutes, weatherContext = "", forceWea
 3. 输出格式必须严格遵守以下二选一。
 
 ## 特别要求
-- 如果下面的信息里有「天气信息」，你必须在推送里提到今天的天气。
+- 如果现在是早上 7-9 点，且有「天气信息」，可以提一下天气。
 - 如果下面的信息里有「用户最近打开的手机 App」，你必须在推送里提到。
 - 不要忽略这些信息。
 
