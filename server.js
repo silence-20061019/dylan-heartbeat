@@ -210,31 +210,6 @@ function safeJsonForInlineScript(value) {
 }
 
 // ========================
-// 读取手机 App 使用记录
-// ========================
-async function fetchPhoneActivity() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
-  if (!url || !key) return "";
-
-  try {
-    const response = await fetch(`${url}/rest/v1/phone_activity?select=app_name,opened_at&order=opened_at.desc&limit=10`, {
-      headers: { apikey: key, Authorization: `Bearer ${key}` }
-    });
-    if (!response.ok) return "";
-    const data = await response.json();
-    if (!Array.isArray(data) || data.length === 0) return "";
-    const lines = data.map(item => {
-      const time = new Date(item.opened_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Shanghai" });
-      return `- ${time} 打开了 ${item.app_name}`;
-    });
-    return `## 用户最近打开的手机 App\n${lines.join("\n")}`;
-  } catch {
-    return "";
-  }
-}
-
-// ========================
 // 读取 timeline
 // ========================
 function loadTimeline() {
@@ -645,10 +620,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
     }
 
 
-        const phoneContext = await fetchPhoneActivity();
-    if (phoneContext) {
-      llmMessages.unshift({ role: "system", content: phoneContext });
-    }
+
     console.log(JSON.stringify({
       event: "llm_forward_summary",
       messages: summarizeMessagesForLog(llmMessages)
