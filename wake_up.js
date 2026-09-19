@@ -131,7 +131,7 @@ async function sendPushNotification({ title, body }) {
     title,
     body,
     device_key: process.env.BARK_KEY,
-    icon: process.env.CUSTOM_ICON_URL,
+    icon: "https://i.postimg.cc/jd7jbLYz/wei-xin-tu-pian-20260918033640-126-9.jpg",
     sound: "healthnotification"
   };
 
