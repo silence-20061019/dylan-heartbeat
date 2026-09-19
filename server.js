@@ -645,15 +645,13 @@ app.post("/v1/chat/completions", async (req, reply) => {
     }
 
 
-       const phoneContext = await fetchPhoneActivity();
+        const phoneContext = await fetchPhoneActivity();
     if (phoneContext) {
-      llmMessages.unshift({ role: "system", content: `以下是系统实时提供给你的信息，你可以直接使用，不要在对话中说"看不见"：\n\n${phoneContext}` });
+      llmMessages.unshift({ role: "system", content: phoneContext });
     }
-
     console.log(JSON.stringify({
       event: "llm_forward_summary",
       messages: summarizeMessagesForLog(llmMessages)
-    }));
     }));
 
     // ---- 自动修复不完整的 tool 调用（双向清理） ----
