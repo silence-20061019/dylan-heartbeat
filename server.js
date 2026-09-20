@@ -733,6 +733,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
     // 请求模型
     const response = await fetch(TARGET_API_URL, {
       method: "POST",
+      signal: AbortSignal.timeout(30_000),
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${process.env.TARGET_API_KEY}`
