@@ -155,23 +155,15 @@ async function sendPushNotification({ title, body }) {
 
 function isDayTime(date = new Date()) {
   const hour = getHourInTimeZone(date, TIME_ZONE);
-  const start = readNumberEnv("WAKE_DAY_START_HOUR", 10, { min: 0, max: 23 });
-  const end = readNumberEnv("WAKE_DAY_END_HOUR", 24, { min: 1, max: 24 });
-  if (start === end) return true;
-  if (start < end) return hour >= start && hour < end;
-  return hour >= start || hour < end;
+  return hour >= 20 || hour < 5;
 }
 
 function getWakeAfterMinutes(date = new Date()) {
-  return isDayTime(date)
-    ? readNumberEnv("DAY_WAKE_AFTER_MINUTES", 60, { min: 1 })
-    : readNumberEnv("NIGHT_WAKE_AFTER_MINUTES", 120, { min: 1 });
+  return isDayTime(date) ? 20 : 180;
 }
 
 function getCheckIntervalMinutes(date = new Date()) {
-  return isDayTime(date)
-    ? readNumberEnv("DAY_CHECK_INTERVAL_MINUTES", 10, { min: 1 })
-    : readNumberEnv("NIGHT_CHECK_INTERVAL_MINUTES", 120, { min: 1 });
+  return isDayTime(date) ? 10 : 60;
 }
 
 function normalizeContentToText(content) {
