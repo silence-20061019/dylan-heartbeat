@@ -676,4 +676,57 @@ console.log(JSON.stringify({
   data_dir_ready: fs.existsSync(DATA_DIR)
 }));
 console.log("==================================\n");
+// ================================================================
+// 2026-10-10 补丁：找不到时间前缀时的兜底
+// 同名的函数排在最下面，会盖住上面那个，所以旧的不用删。
+// ================================================================
+function getLastUserTime(messages) {
+  const reversed = [...messages].reverse();
 
+  // ① 原逻辑：消息自己带时间前缀
+  for (const msg of reversed) {
+    if (msg.role !== "user") continue;
+    const parsed = parseTimelineTimestamp(normalizeContentToText(msg.content));
+    if (parsed) return parsed;
+  }
+
+  // ② 兜底A：时间戳记忆库
+  let db = {};
+  try {
+    db = JSON.parse(fs.readFileSync(runtimeFile("message_timestamps.json"), "utf-8")) || {};
+  } catch {}
+  for (const msg of reversed) {
+    if (msg.role !== "user") continue;
+    const raw = normalizeContentToText(msg.content).trim();
+    const withoutPrefix = raw
+      .replace(/^（?\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[ T]?)\d{1,2}[:：]\d{2}[）\s]*/, "")
+      .trim();
+    const keys = [
+      `${msg.role}::${raw.slice(0, 150)}`,
+      `${msg.role}::${withoutPrefix.slice(0, 150)}`
+    ];
+    for (const key of keys) {
+      if (!db[key]) continue;
+      const t = new Date(db[key]);
+      if (!Number.isNaN(t.getTime())) {
+        console.log(`\n（兜底A）用时间戳记忆库读到：${t.toISOString()}\n`);
+        return t;
+      }
+    }
+  }
+
+  // ③ 兜底B：时间线文件的最后写入时间
+  try {
+    const stat = fs.statSync(TIMELINE_PATH);
+    console.log(`\n（兜底B）用时间线最后写入时间：${stat.mtime.toISOString()}\n`);
+    return stat.mtime;
+  } catch {}
+
+  // ④ 都不行：把最近一条用户消息打出来，下次好排查
+  const lastUser = reversed.find(m => m.role === "user");
+  console.log("未找到用户时间");
+  if (lastUser) {
+    console.log("诊断：最近一条用户消息长这样：" + normalizeContentToText(lastUser.content).slice(0, 80));
+  }
+  return null;
+}
