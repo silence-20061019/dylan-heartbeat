@@ -1740,6 +1740,33 @@ app.post("/admin/presets/delete", { preHandler: basicAuth }, async (req, reply) 
 // ========================
 // 心跳接口
 // ========================
+// 2026-10-11 补丁：游戏模式开关（时衍打游戏时用）
+// 打开：POST /internal/game-mode?minutes=20   请求头 x-game-key: <GAME_MODE_KEY>
+app.post("/internal/game-mode", async (req, reply) => {
+  if (!process.env.GAME_MODE_KEY) {
+    return reply.code(503).send({ ok: false, reason: "没设 GAME_MODE_KEY" });
+  }
+  if (String(req.headers["x-game-key"] || "") !== process.env.GAME_MODE_KEY) {
+    return reply.code(403).send({ ok: false, reason: "key 不对" });
+  }
+  const minutes = Math.min(60, Math.max(1, Number(req.query && req.query.minutes) || 20));
+  const until = Date.now() + minutes * 60 * 1000;
+  fs.writeFileSync(
+    path.join(DATA_DIR, "game_mode.json"),
+    JSON.stringify({ until, set_at: new Date().toISOString() })
+  );
+  return { ok: true, minutes, until: new Date(until).toISOString() };
+});
+
+// 关掉游戏模式（不用钥匙——关掉只是省钱）
+app.post("/internal/game-mode/off", async () => {
+  fs.writeFileSync(
+    path.join(DATA_DIR, "game_mode.json"),
+    JSON.stringify({ until: 0, set_at: new Date().toISOString() })
+  );
+  return { ok: true, off: true };
+});
+
 app.post("/internal/heartbeat", async (req, reply) => {
   wakeUpLastHeartbeat = Date.now();
   reply.send({ status: "ok" });

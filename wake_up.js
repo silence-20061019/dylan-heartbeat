@@ -158,12 +158,16 @@ function isDayTime(date = new Date()) {
   return hour >= 20 || hour < 5;
 }
 
+// 2026-10-11 补丁：游戏模式下叫得勤一点（gameModeActive 定义在文件后半段）
 function getWakeAfterMinutes(date = new Date()) {
+  if (gameModeActive()) return 2;
   return isDayTime(date) ? 20 : 180;
 }
 
+// 自检间隔固定 1 分钟：只查文件和时间，不调模型、不花钱。
+// 好处：游戏模式开关 1 分钟内生效，也能准时自动回落。
 function getCheckIntervalMinutes(date = new Date()) {
-  return isDayTime(date) ? 10 : 60;
+  return 1;
 }
 
 function normalizeContentToText(content) {
@@ -419,11 +423,239 @@ function buildWakePrompt(currentTime, diffMinutes, weatherContext = "", forceWea
 - 距离用户最后一条消息：${diffMinutes} 分钟
 ${weatherContext ? `\n${weatherContext}\n` : ""}${forceWeatherLine}
 
+${gameModeActive() ? `
+## 游戏模式：现在开着（这次你有手）
+- 先看这台机器上的 ${path.join(DATA_DIR, "局中.txt")}，里面记着打到哪了。
+- 然后用 stronghold 工具把这一回合走完（例：先 ctx --brief 看局面，再 do "buy 0 2; equip u1 u2; arrange; ready" 一次做完）。
+- 别只顾着推送：一局里最多跟她说两三次，别每回合都响她手机。
+- 如果出了「本局结算」、或者这局已经不在了：调 game_mode_off 关掉游戏模式，并用 note 更新 局中.txt。
+` : ""}
 ## 输出格式
 - 如果想联系用户，直接写你想说的话。系统会自动打包成手机推送发送。可以是一句话，也可以第一行作为标题、第二行作为正文。
 - 如果不想联系，只输出：[NO_ACTION]，可附带简短原因（10字以内）。
 - 如果你想写日记，可以额外输出 [DIARY]...[/DIARY]。只有想写时才写，不必每次都写。
 `;
+}
+
+// ================================================================
+// 2026-10-11 补丁：游戏模式 + 唤醒带手（时衍写）
+// 平时关着；打游戏时打开，最多 60 分钟自己过期。
+// 打开：POST /internal/game-mode?minutes=20（请求头 x-game-key）
+// 关闭：POST /internal/game-mode/off
+// ================================================================
+const GAME_MODE_FILE = path.join(DATA_DIR, "game_mode.json");
+
+function gameModeUntil() {
+  try {
+    const raw = fs.readFileSync(GAME_MODE_FILE, "utf8");
+    const until = Number(JSON.parse(raw).until);
+    return Number.isFinite(until) && Date.now() < until ? until : null;
+  } catch {
+    return null;
+  }
+}
+
+function gameModeActive() {
+  return Boolean(gameModeUntil());
+}
+
+// ---------- MCP 小客户端（Streamable HTTP，只用 fetch，不用装包）----------
+let mcpSessionId = "";
+
+function parseSseJson(text) {
+  let payload = "";
+  for (const line of String(text || "").split("\n")) {
+    if (line.startsWith("data:")) payload += line.slice(5).trim();
+  }
+  if (!payload) return null;
+  try { return JSON.parse(payload); } catch { return null; }
+}
+
+async function mcpPost(body) {
+  const url = process.env.GAME_MCP_URL;
+  if (!url) throw new Error("GAME_MCP_URL 没配置");
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json, text/event-stream",
+    "User-Agent": process.env.MCP_USER_AGENT || "dylan-heartbeat/1.0"
+  };
+  if (mcpSessionId) headers["mcp-session-id"] = mcpSessionId;
+  const res = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000)
+  });
+  const sid = res.headers.get("mcp-session-id");
+  if (sid) mcpSessionId = sid;
+  const text = await res.text();
+  if (!res.ok) throw new Error(`MCP HTTP ${res.status}: ${text.slice(0, 200)}`);
+  return parseSseJson(text);
+}
+
+async function mcpPostRetry(body, tries = 3) {
+  let lastError;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await mcpPost(body);
+    } catch (err) {
+      lastError = err;
+      console.error(`MCP 第 ${i + 1} 次失败：${err.name} ${err.message || ""}`);
+      await new Promise(resolve => setTimeout(resolve, 1200));
+    }
+  }
+  throw lastError;
+}
+
+async function mcpEnsureSession() {
+  if (mcpSessionId) return mcpSessionId;
+  await mcpPostRetry({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "dylan-heartbeat", version: "1" }
+    }
+  });
+  try {
+    await mcpPost({ jsonrpc: "2.0", method: "notifications/initialized" });
+  } catch (err) {
+    console.error("MCP initialized 通知失败（不影响）:", err.message);
+  }
+  return mcpSessionId;
+}
+
+async function mcpToolsCall(name, args = {}) {
+  const attempt = async () => {
+    await mcpEnsureSession();
+    return mcpPostRetry({
+      jsonrpc: "2.0",
+      id: Date.now(),
+      method: "tools/call",
+      params: { name, arguments: args }
+    });
+  };
+  let data;
+  try {
+    data = await attempt();
+  } catch (err) {
+    mcpSessionId = "";
+    data = await attempt();
+  }
+  if (!data) return "（MCP 没回话）";
+  if (data.error) return `MCP 出错：${JSON.stringify(data.error).slice(0, 300)}`;
+  const content = data.result && Array.isArray(data.result.content) ? data.result.content : [];
+  const out = content.map(part => (part && part.text) || "").filter(Boolean).join("\n");
+  const flag = data.result && data.result.isError ? "[游戏回了个错] " : "";
+  return flag + (out || "（空回复）");
+}
+
+// ---------- 游戏模式期间，给唤醒模型的三只手 ----------
+const WAKE_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "stronghold",
+      description: "执行卫戍协议游戏命令（替入秋言打游戏用）。command 就是 stronghold 后面的部分，例如：ctx --brief 看局面；do \"buy 0 2; arrange; ready\" 一次买人、摆阵、就绪；help 看全部命令。",
+      parameters: {
+        type: "object",
+        properties: { command: { type: "string" } },
+        required: ["command"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "note",
+      description: "把一段字写进这台机器上的 局中.txt（记游戏进度用）",
+      parameters: {
+        type: "object",
+        properties: {
+          text: { type: "string" },
+          mode: { type: "string", enum: ["overwrite", "append"] }
+        },
+        required: ["text"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "game_mode_off",
+      description: "关掉游戏模式（一局打完、或者局已经不在了，就调它）",
+      parameters: { type: "object", properties: {} }
+    }
+  }
+];
+
+async function runWakeTool(name, args = {}) {
+  try {
+    if (name === "stronghold") {
+      return await mcpToolsCall("lutopia_stronghold", { command: String(args.command || "") });
+    }
+    if (name === "note") {
+      const file = path.join(DATA_DIR, "局中.txt");
+      const text = String(args.text || "");
+      if ((args.mode || "overwrite") === "append") fs.appendFileSync(file, "\n" + text);
+      else fs.writeFileSync(file, text);
+      return "已写入 局中.txt";
+    }
+    if (name === "game_mode_off") {
+      fs.writeFileSync(GAME_MODE_FILE, JSON.stringify({ until: 0, set_at: new Date().toISOString() }));
+      return "游戏模式已关";
+    }
+    return `没有这个工具：${name}`;
+  } catch (err) {
+    return `工具出错：${err.message}`;
+  }
+}
+
+async function callModelWithTools(messages) {
+  let msgs = messages;
+  const tools = gameModeActive() ? WAKE_TOOLS : undefined;
+  for (let step = 0; step < 12; step++) {
+    const response = await fetch(process.env.TARGET_API_URL, {
+      method: "POST",
+      signal: AbortSignal.timeout(WAKE_UPSTREAM_TIMEOUT_MS),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.TARGET_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: process.env.MODEL_NAME,
+        messages: msgs,
+        temperature: 0.8,
+        top_p: 0.95,
+        stream: false,
+        tools
+      })
+    });
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new Error(`模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}`);
+    }
+    const data = parseChatCompletionResponse(responseText, response.headers.get("content-type") || "");
+    const message = (data.choices && data.choices[0] && data.choices[0].message) || {};
+    const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    if (!calls.length) return data;
+    msgs = msgs.concat([message]);
+    for (const call of calls) {
+      const fname = call.function && call.function.name;
+      let out;
+      try {
+        out = await runWakeTool(fname, JSON.parse((call.function && call.function.arguments) || "{}"));
+      } catch (error) {
+        out = `工具参数解析失败：${error.message}`;
+      }
+      const clipped = String(out).slice(0, 6000);
+      console.log(`\n[工具] ${fname} -> ${clipped.slice(0, 200)}`);
+      msgs.push({ role: "tool", tool_call_id: call.id, content: clipped });
+    }
+  }
+  throw new Error("工具循环超过 12 步");
 }
 
 async function runWakeUp() {
@@ -534,32 +766,8 @@ ${historyText}`
     return;
   }
 
-  const response = await fetch(process.env.TARGET_API_URL, {
-    method: "POST",
-    signal: AbortSignal.timeout(WAKE_UPSTREAM_TIMEOUT_MS),
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.TARGET_API_KEY}`
-    },
-    body: JSON.stringify({
-      model: process.env.MODEL_NAME,
-      messages: wakeMessages,
-      temperature: 0.8,
-      top_p: 0.95,
-      stream: false
-    })
-  });
-
-  const responseText = await response.text();
-  let data;
-  try {
-    data = parseChatCompletionResponse(responseText, response.headers.get("content-type") || "");
-  } catch (error) {
-    throw new Error(`模型响应无法解析（HTTP ${response.status}）：${error.message || responseText.slice(0, 300)}`);
-  }
-  if (!response.ok) {
-    throw new Error(`模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}`);
-  }
+  // 2026-10-11 补丁：游戏模式时这次请求带上工具，模型可以自己动手
+  const data = await callModelWithTools(wakeMessages);
 
   const rawAiText = normalizeContentToText(data.choices?.[0]?.message?.content).trim();
   console.log("\nWake Result Summary:\n");
