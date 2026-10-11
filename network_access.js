@@ -25,6 +25,9 @@ function decideRequestAccess({
   // /test-bark 只是穿过网络层，路由本身仍必须通过与管理页相同的 Basic Auth。
   if (requestPath.startsWith("/admin") || requestPath === "/healthz" || requestPath === "/test-bark") return { allow: true };
 
+  // 2026-10-11 补丁：游戏模式开关要走公网（路由里用 x-game-key 校验），别的 /internal/ 一律照旧只认本机
+  if (requestPath === "/internal/game-mode" || requestPath === "/internal/game-mode/off") return { allow: true };
+
   // 批注 2026-08-10：云平台反代的 10/172/192.168 地址不代表最终访客可信；
   // 内部写接口只接受同容器 localhost，不能被公网代理转发后伪造心跳或唤醒事件。
   if (requestPath.startsWith("/internal/")) {
