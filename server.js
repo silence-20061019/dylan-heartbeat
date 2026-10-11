@@ -1758,8 +1758,14 @@ app.post("/internal/game-mode", async (req, reply) => {
   return { ok: true, minutes, until: new Date(until).toISOString() };
 });
 
-// 关掉游戏模式（不用钥匙——关掉只是省钱）
-app.post("/internal/game-mode/off", async () => {
+// 关掉游戏模式（也要钥匙：这东西从公网能进，就得有个门）
+app.post("/internal/game-mode/off", async (req, reply) => {
+  if (!process.env.GAME_MODE_KEY) {
+    return reply.code(503).send({ ok: false, reason: "没设 GAME_MODE_KEY" });
+  }
+  if (String(req.headers["x-game-key"] || "") !== process.env.GAME_MODE_KEY) {
+    return reply.code(403).send({ ok: false, reason: "key 不对" });
+  }
   fs.writeFileSync(
     path.join(DATA_DIR, "game_mode.json"),
     JSON.stringify({ until: 0, set_at: new Date().toISOString() })
