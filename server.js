@@ -33,6 +33,17 @@ const app = Fastify({
 
 app.register(require("@fastify/formbody"));
 
+// 批注 2026-10-12（时衍）：一个请求出错不该把整台机器拖走。
+// 之前 /v1/chat/completions 在上游断线时会抛 ERR_HTTP_HEADERS_SENT（在 Fastify 的
+// 错误处理里抛出，没人接住）→ 进程 exit code=1 → railway_start.js 把 gateway +
+// wake-up 一起收走 → 整个域名 502。这两个兜底只记录、不退出。
+process.on("uncaughtException", error => {
+  console.error("⚠️ 未捕获异常（已拦截，不退出进程）:", error?.code || "", error?.message || error);
+});
+process.on("unhandledRejection", reason => {
+  console.error("⚠️ 未处理的 Promise 拒绝（已拦截，不退出进程）:", reason?.code || "", reason?.message || reason);
+});
+
 const PORT = Number(process.env.PORT) || 3000;
 const TARGET_API_URL = process.env.TARGET_API_URL;
 const TIME_ZONE = resolveTimeZone();
@@ -583,6 +594,8 @@ app.get("/v1/models", async (req, reply) => {
 // Chat Completions
 // ========================
 app.post("/v1/chat/completions", async (req, reply) => {
+  // 批注 2026-10-12（时衍）：流式一旦开始写 header，就不能再让 Fastify 发第二个响应。
+  let streamingStarted = false;
   try {
     const body = req.body;
     // 批注 2026-07-15：公开部署时日志不能默认写入完整上下文；
@@ -757,22 +770,41 @@ app.post("/v1/chat/completions", async (req, reply) => {
       return reply.code(response.status).send({ error: "上游 API 没有返回可读取的响应体" });
     }
 
+    // 批注 2026-10-12（时衍）：要直通原生 response 就得先把回复交给它自己管。
+    // 少了 hijack，Fastify 仍然认为自己握着这次回复；上游中途断线时下面的 catch
+    // 会再 reply.send(500)，Fastify 报「回复已发送」，错误处理器再写一次 header，
+    // 于是 ERR_HTTP_HEADERS_SENT 一路冒到进程外，gateway 直接 exit(1)。
+    reply.hijack();
+    streamingStarted = true;
+
     reply.raw.writeHead(response.status, {
       "Content-Type": upstreamContentType || "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive"
     });
 
-    const reader = response.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      reply.raw.write(value);
+    try {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        reply.raw.write(value);
+      }
+      reply.raw.end();
+    } catch (streamErr) {
+      // 上游断了：客户端已经收到 200 和半个流，只能把连接收干净，不能再发第二个响应。
+      console.error("⚠️ 流式直通中断（上游断线），已就地收尾:", streamErr?.code || "", streamErr?.message || streamErr);
+      try { await response.body.cancel(); } catch {}
+      try { reply.raw.end(); } catch {}
     }
-    reply.raw.end();
   } catch (err) {
     console.error(err);
-    reply.code(500).send({ error: err.message });
+    if (streamingStarted || reply.raw.headersSent || reply.raw.writableEnded) {
+      // 已经开流了：没有第二个响应可发，收尾即可。
+      try { reply.raw.end(); } catch {}
+      return;
+    }
+    return reply.code(500).send({ error: err.message });
   }
 });
 
